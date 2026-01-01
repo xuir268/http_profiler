@@ -1,0 +1,7 @@
+[
+  {
+    "directory": "/Users/sparshgupta/Desktop/profiler-server",
+    "command": "/usr/bin/clang++ -I/opt/homebrew/include -std=c++17 -c src/main.cpp",
+    "file": "src/main.cpp"
+  }
+]
