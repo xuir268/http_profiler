@@ -1,0 +1,42 @@
+[
+  {
+    "directory": "/Users/sparshgupta/Desktop/profiler-server",
+    "command": "/usr/bin/clang++ -I/opt/homebrew/include -Isrc -std=c++17 -c src/main.cpp",
+    "file": "src/main.cpp"
+  },
+  {
+    "directory": "/Users/sparshgupta/Desktop/profiler-server",
+    "command": "/usr/bin/clang++ -I/opt/homebrew/include -Isrc -std=c++17 -c src/pipeline.h",
+    "file": "src/pipeline.h"
+  },
+  {
+    "directory": "/Users/sparshgupta/Desktop/profiler-server",
+    "command": "/usr/bin/clang++ -I/opt/homebrew/include -Isrc -std=c++17 -c src/middleware.h",
+    "file": "src/middleware.h"
+  },
+  {
+    "directory": "/Users/sparshgupta/Desktop/profiler-server",
+    "command": "/usr/bin/clang++ -I/opt/homebrew/include -Isrc -std=c++17 -c src/app.h",
+    "file": "src/app.h"
+  },
+  {
+    "directory": "/Users/sparshgupta/Desktop/profiler-server",
+    "command": "/usr/bin/clang++ -I/opt/homebrew/include -Isrc -std=c++17 -c src/context_pool.h",
+    "file": "src/context_pool.h"
+  },
+  {
+    "directory": "/Users/sparshgupta/Desktop/profiler-server",
+    "command": "/usr/bin/clang++ -I/opt/homebrew/include -Isrc -std=c++17 -c src/http_server.h",
+    "file": "src/http_server.h"
+  },
+  {
+    "directory": "/Users/sparshgupta/Desktop/profiler-server",
+    "command": "/usr/bin/clang++ -I/opt/homebrew/include -Isrc -std=c++17 -c src/profile.hpp",
+    "file": "src/profile.hpp"
+  },
+  {
+    "directory": "/Users/sparshgupta/Desktop/profiler-server",
+    "command": "/usr/bin/clang++ -I/opt/homebrew/include -Isrc -std=c++17 -c src/worker_pool.h",
+    "file": "src/worker_pool.h"
+  }
+]
