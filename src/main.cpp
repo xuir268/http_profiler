@@ -1,6 +1,8 @@
 #include<iostream>
 #include<thread>
 #include <boost/asio.hpp>
+#include "context_pool.h"
+#include "worker_pool.h"
 
 namespace mainServer{
 
@@ -16,8 +18,8 @@ int main(int argc, char** argv) {
     boost::asio::io_context io_context(io_threads + worker_threads);
     auto guard = boost::asio::make_work_guard(io_context);
 
-    //contextPool ctx_pool(8192);
-    //WorkerPool workers(worker_threads);
+    contextPool ctx_pool(8192);
+    WorkerPool workers(worker_threads);
 
     auto listner = std::make_shared<Listener>(
         io_context, 

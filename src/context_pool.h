@@ -6,20 +6,18 @@
 #include <cstdint>
 #include <memory>
 
-namespace profiler {
-
 struct ReqContext {
     uint64_t request_id = 0;
     std::string method;
     std::string target;
-    uint32_t content_lenghth = 0;
+    uint32_t content_length = 0;
 
     std::string scratch;
     void reset() {
         request_id = 0;
         method = {};
         target = {};
-        content_lenghth = 0;
+        content_length = 0;
         scratch.clear();
     }
 };
@@ -66,4 +64,3 @@ public:
     ~contextPool() = default;
 };
 
-}  // namespace profiler

@@ -1,1 +1,23 @@
-./.vscode
+# IDEs
+/.vscode
+.idea/
+
+# Build artifacts
+build/
+CMakeFiles/
+cmake_install.cmake
+Makefile
+*.o
+*.a
+*.so
+*.exe
+*.out
+*.d
+
+# CMake
+compile_commands.json
+
+# Editor temp files
+*.swp
+*.swo
+*~
