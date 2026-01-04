@@ -34,9 +34,17 @@ private:
         CallFrame& operator=(const CallFrame&) = delete;
         };
 
+         static std::vector<std::string>& get_stack() {
+        return caller_stack;
+    }
+
         static void print() {
             std::cout << "[Current Path]";
             print_chain();
             std::cout << std::endl;
+        }
+
+        static CallFrame span(std::string_view name) {
+            return CallFrame(std::string(name));
         }
 };

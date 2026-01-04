@@ -6,11 +6,22 @@
 #include <cstdint>
 #include <memory>
 
+enum class HttpStatus : uint16_t {
+    OK = 200,
+    BadRequest = 400,
+    Unauthorized = 401,
+    Forbidden = 403,
+    NotFound = 404,
+    InternalServerError = 500,
+    ServiceUnavailable = 503
+};
+
 struct ReqContext {
     uint64_t request_id = 0;
     std::string method;
     std::string target;
     uint32_t content_length = 0;
+    HttpStatus status = HttpStatus::OK;
 
     std::string scratch;
     void reset() {
@@ -18,6 +29,7 @@ struct ReqContext {
         method = {};
         target = {};
         content_length = 0;
+        status = HttpStatus::OK;
         scratch.clear();
     }
 };
