@@ -1,3 +1,0 @@
-/Users/sparshgupta/Desktop/profiler-server/build/CMakeFiles/profiler-server.dir
-/Users/sparshgupta/Desktop/profiler-server/build/CMakeFiles/edit_cache.dir
-/Users/sparshgupta/Desktop/profiler-server/build/CMakeFiles/rebuild_cache.dir
