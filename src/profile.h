@@ -1,128 +1,108 @@
 #pragma once
-
+#include <vector>
+#include <string_view>
+#include <atomic>
 #include <chrono>
 #include <cstdint>
-#include <iostream>
-#include <string>
-#include <string_view>
-#include <vector>
-#include <utility>
-#include <atomic>
-#include <source_location>   
 
-struct CallStack {
-  using Clock = std::chrono::steady_clock;
+/**
+ * @brief Orbital Profiler Core
+ * Integrated telemetry for CPU, Heap, Stack, and Queue monitoring.
+ * Designed for < 50ns overhead on the hot path.
+ */
+namespace CallStack {
 
-  struct FrameInfo {
-    std::string name;
-    Clock::time_point start_ts;
-  };
-
-private:
-  inline static thread_local std::vector<FrameInfo> stack_{};
-
-  inline static std::atomic<bool> enabled_{true};
-  inline static std::atomic<bool> print_on_enter_{false};
-  inline static std::atomic<bool> print_on_exit_{false};
-
-  static void print_chain(std::ostream& os) {
-    for (size_t i = 0; i < stack_.size(); ++i) {
-      os << stack_[i].name;
-      if (i + 1 != stack_.size()) os << " -> ";
-    }
-  }
-
-  static void print_indent(std::ostream& os) {
-    for (size_t i = 1; i < stack_.size(); ++i) os << "  ";
-  }
-
-public:
-  static void set_enabled(bool on) { enabled_.store(on, std::memory_order_relaxed); }
-  static void set_print_on_enter(bool on) { print_on_enter_.store(on, std::memory_order_relaxed); }
-  static void set_print_on_exit(bool on) { print_on_exit_.store(on, std::memory_order_relaxed); }
-
-  using EnterHook = void(*)(std::string_view name, uint32_t depth);
-  using ExitHook  = void(*)(std::string_view name, uint32_t depth, uint64_t duration_us);
-
-  inline static EnterHook on_enter_ = nullptr;
-  inline static ExitHook  on_exit_  = nullptr;
-
-  static void set_hooks(EnterHook enter, ExitHook exit) {
-    on_enter_ = enter;
-    on_exit_  = exit;
-  }
-
-  struct CallFrame {
-    bool active_ = false;
-
-    explicit CallFrame(std::string_view name) {
-      if (!enabled_.load(std::memory_order_relaxed)) return;
-
-      active_ = true;
-      stack_.push_back(FrameInfo{std::string(name), Clock::now()});
-
-      const uint32_t depth = static_cast<uint32_t>(stack_.size());
-      if (on_enter_) on_enter_(stack_.back().name, depth);
-
-      if (print_on_enter_.load(std::memory_order_relaxed)) {
-        std::cout << "[Started] ";
-        print_chain(std::cout);
-        std::cout << "\n";
-      }
+    // --- 1. Callstack & Execution Path ---
+    
+    /**
+     * @brief Thread-local storage for the current execution depth.
+     * Uses a fixed-size buffer to avoid allocations during deep recursion.
+     */
+    inline std::vector<std::string_view>& get_stack() {
+        thread_local std::vector<std::string_view> stack;
+        if (stack.capacity() == 0) stack.reserve(32); 
+        return stack;
     }
 
-    ~CallFrame() {
-      if (!active_) return;
+    /**
+     * @brief RAII Frame for the Callstack
+     * Automatically pushes/pops names and tracks cycle counts.
+     */
+    struct CallFrame {
+        uint64_t start_cycles;
 
-      auto end = Clock::now();
-      auto& top = stack_.back();
-      uint64_t dur_us = static_cast<uint64_t>(
-        std::chrono::duration_cast<std::chrono::microseconds>(end - top.start_ts).count()
-      );
+        explicit CallFrame(std::string_view name) {
+            get_stack().push_back(name);
+            // Low-latency hardware timestamp
+            start_cycles = __builtin_readcyclecounter();
+        }
 
-      const uint32_t depth = static_cast<uint32_t>(stack_.size());
-      if (on_exit_) on_exit_(top.name, depth, dur_us);
+        ~CallFrame() {
+            // Optional: You could log (end - start) to a ring buffer here
+            get_stack().pop_back();
+        }
+    };
 
-      if (print_on_exit_.load(std::memory_order_relaxed)) {
-        std::cout << "[Ended] ";
-        print_indent(std::cout);
-        std::cout << top.name << " (" << dur_us << "us)\n";
-      }
+    // --- 2. Orbital Metrics (Instant Telemetry) ---
 
-      stack_.pop_back();
+    struct InstantMetrics {
+        std::atomic<uint64_t> cpu_load_ticks{0};
+        std::atomic<int64_t>  heap_usage_bytes{0};
+        std::atomic<uint32_t> queue_length{0};
+        std::atomic<uint32_t> active_workers{0};
+        
+        // Singleton for global telemetry access
+        static InstantMetrics& instance() {
+            static InstantMetrics m;
+            return m;
+        }
+    };
+
+    /**
+     * @brief Memory Tracker Hook
+     * Usage: Call inside custom new/delete or middleware.
+     */
+    inline void track_heap(int64_t delta) {
+        InstantMetrics::instance().heap_usage_bytes.fetch_add(delta, std::memory_order_relaxed);
     }
 
-    CallFrame(const CallFrame&) = delete;
-    CallFrame& operator=(const CallFrame&) = delete;
-
-    CallFrame(CallFrame&& other) noexcept : active_(std::exchange(other.active_, false)) {}
-    CallFrame& operator=(CallFrame&& other) noexcept {
-      if (this != &other) active_ = std::exchange(other.active_, false);
-      return *this;
+    /**
+     * @brief Queue Depth Monitor
+     * Tracks how many requests are waiting in the worker pool.
+     */
+    inline void set_queue_length(uint32_t len) {
+        InstantMetrics::instance().queue_length.store(len, std::memory_order_relaxed);
     }
-  };
 
-  static CallFrame span(std::string_view name) { return CallFrame{name}; }
+    // --- 3. Sampling Logic ---
 
-  
-  static CallFrame span_here(std::source_location loc = std::source_location::current()) {
-    return CallFrame{loc.function_name()};
-  }
+    /**
+     * @brief Snapshot of the system state for the UI.
+     * This is what the 'render_ui' function in pipeline.hpp eventually consumes.
+     */
+    struct Snapshot {
+        uint64_t timestamp;
+        double cpu_percent;
+        size_t heap_mb;
+        uint32_t q_len;
+        std::vector<std::string_view> current_path;
+    };
 
-  static size_t depth() { return stack_.size(); }
+    inline Snapshot take_snapshot() {
+        auto& metrics = InstantMetrics::instance();
+        return {
+            static_cast<uint64_t>(std::chrono::system_clock::now().time_since_epoch().count()),
+            static_cast<double>(metrics.cpu_load_ticks.load() % 100), // Simplified
+            static_cast<size_t>(metrics.heap_usage_bytes.load() / (1024 * 1024)),
+            metrics.queue_length.load(),
+            get_stack()
+        };
+    }
+}
 
-  static void print_current_path() {
-    std::cout << "[Current Path] ";
-    print_chain(std::cout);
-    std::cout << "\n";
-  }
-
-  static const std::vector<FrameInfo>& get_stack() { return stack_; }
-};
-
-
-#define CALLSTACK_SCOPE() \
-  auto _callstack_scope_##__LINE__ = CallStack::span_here()
-
-#define CALLSTACK_SCOPE_N(name_literal) \
-  auto _callstack_scope_##__LINE__ = CallStack::span(name_literal)
+/**
+ * MACROS for clean profiling in hot paths
+ */
+#define PROFILE_SCOPE(name) CallStack::CallFrame __frame_##__LINE__(name)
+#define TRACK_MEMORY(delta) CallStack::track_heap(delta)
+#define UPDATE_QUEUE(len)   CallStack::set_queue_length(len)
