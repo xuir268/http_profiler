@@ -65,80 +65,132 @@ namespace Middlewares {
         // pre-loaded into a string_view to avoid repeated string allocations.
         std::string html = R"(
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <script src="https://d3js.org/d3.v7.min.js"></script>
     <script src="https://cdn.tailwindcss.com"></script>
     <style>
-        .node rect { stroke: #020617; stroke-width: 1px; transition: 0.2s; }
-        .node rect:hover { filter: saturate(2) brightness(1.5); cursor: crosshair; }
-        .node text { font-size: 10px; fill: rgba(255,255,255,0.9); font-family: 'JetBrains Mono', monospace; pointer-events: none; font-weight: 600; }
+        @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&display=swap');
+        body { font-family: 'JetBrains Mono', monospace; background-color: #020617; color: #94a3b8; }
+        .glass { background: rgba(15, 23, 42, 0.6); backdrop-filter: blur(10px); border: 1px solid rgba(51, 65, 85, 0.4); }
+        .core-box { transition: all 0.3s ease; border: 1px solid #1e293b; height: 40px; display: flex; align-items: center; justify-content: center; font-size: 10px; border-radius: 4px; }
+        .core-active { background: rgba(16, 185, 129, 0.2); border-color: #10b981; color: #10b981; box-shadow: 0 0 10px rgba(16, 185, 129, 0.2); }
+        .orbit-rotate { animation: spin 20s linear infinite; }
+        @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
     </style>
 </head>
-<body class="bg-slate-950 text-slate-200 p-8">
-    <div class="max-w-6xl mx-auto">
-        <div class="flex items-center justify-between mb-6">
+<body class="p-8">
+    <div class="max-w-7xl mx-auto">
+        <!-- Header -->
+        <div class="flex justify-between items-end mb-8 border-b border-slate-800 pb-6">
             <div>
-                <h1 class="text-3xl font-black tracking-tighter text-emerald-400">PIPELINE_HEAT_MAP</h1>
-                <p class="text-slate-500 text-xs font-mono uppercase tracking-widest">Monotonic Stack Depth Analysis</p>
+                <h1 class="text-3xl font-black tracking-tighter text-emerald-400 italic">ORBITER_SYSTEM_v2</h1>
+                <p class="text-[10px] uppercase tracking-[0.2em] text-slate-500">Middleware Thread Affinity & System Core Saturation</p>
             </div>
-            <div class="text-right">
-                <span class="px-2 py-1 rounded bg-emerald-500/10 border border-emerald-500/20 text-emerald-500 text-[10px] font-bold">LIVE_STREAM_ACTIVE</span>
+            <div class="flex gap-8 text-right">
+                <div><p class="text-[10px] text-slate-500">HEAP_ACTIVE</p><p id="metric-heap" class="text-xl font-bold text-slate-200">0 MB</p></div>
+                <div><p class="text-[10px] text-slate-500">QUEUE_DEPTH</p><p id="metric-queue" class="text-xl font-bold text-amber-500">0</p></div>
+                <div><p class="text-[10px] text-slate-500">UPTIME</p><p class="text-xl font-bold text-emerald-500">LIVE</p></div>
             </div>
         </div>
-        
-        <div id="chart" class="bg-slate-900 rounded-lg border border-slate-800 p-1 shadow-2xl overflow-hidden"></div>
+
+        <div class="grid grid-cols-12 gap-6">
+            <!-- Left: Core Grid -->
+            <div class="col-span-4 space-y-6">
+                <div class="glass rounded-2xl p-6">
+                    <h2 class="text-xs font-bold uppercase mb-4 text-slate-400">Physical Core Map</h2>
+                    <div id="core-grid" class="grid grid-cols-4 gap-2">
+                        <!-- Cores injected here -->
+                    </div>
+                </div>
+                
+                <div class="glass rounded-2xl p-6 relative overflow-hidden h-48 flex flex-col items-center justify-center">
+                    <div class="absolute inset-0 opacity-10 orbit-rotate">
+                        <svg viewBox="0 0 100 100" class="w-full h-full"><circle cx="50" cy="50" r="45" fill="none" stroke="white" stroke-dasharray="2 4"/></svg>
+                    </div>
+                    <div id="gauge-container"></div>
+                    <p class="text-[10px] text-slate-500 uppercase mt-2">Overall Pressure</p>
+                </div>
+            </div>
+
+            <!-- Right: Thread Explorer -->
+            <div class="col-span-8 glass rounded-2xl p-6">
+                <h2 class="text-xs font-bold uppercase mb-4 text-slate-400">Thread Execution Paths</h2>
+                <div id="thread-list" class="space-y-6 max-h-[600px] overflow-y-auto pr-2">
+                    <!-- Threads injected here -->
+                </div>
+            </div>
+        </div>
     </div>
 
     <script>
-        const data = )" + json_data + R"(;
-        const container = document.getElementById('chart');
-        const width = container.offsetWidth;
-        const height = 600;
-        
-        const svg = d3.select("#chart").append("svg")
-            .attr("width", width)
-            .attr("height", height)
-            .attr("viewBox", [0, 0, width, height]);
+        // Data injected by C++ middleware
+        const telemetry = {{TELEMETRY_JSON}};
 
-        // Create a heat-based color scale (Emerald for shallow, Amber/Orange for deep)
-        const color = d3.scaleSequential()
-            .domain([0, 10]) 
-            .interpolator(d3.interpolateRgbBasis(["#10b981", "#3b82f6", "#f59e0b", "#ef4444"]));
+        function init() {
+            document.getElementById('metric-heap').innerText = telemetry.metrics.heap + " MB";
+            document.getElementById('metric-queue').innerText = telemetry.metrics.queue;
+            
+            renderCores();
+            renderThreads();
+            renderPressure();
+        }
 
-        const root = d3.hierarchy(data)
-            .sum(d => d.value);
+        function renderCores() {
+            const grid = document.getElementById('core-grid');
+            const activeCores = new Set(telemetry.threads.map(t => t.core).filter(c => c !== -1));
+            
+            for(let i = 0; i < 16; i++) {
+                const div = document.createElement('div');
+                div.className = `core-box ${activeCores.has(i) ? 'core-active' : ''}`;
+                div.innerText = `C${i}`;
+                grid.appendChild(div);
+            }
+        }
 
-        // Icicle plot layout (Top-to-Bottom hierarchy)
-        d3.partition()
-            .size([width, height])
-            .padding(1)
-            (root);
+        function renderThreads() {
+            const list = document.getElementById('thread-list');
+            telemetry.threads.forEach(t => {
+                const threadDiv = document.createElement('div');
+                threadDiv.className = "p-4 bg-slate-900/50 border border-slate-800 rounded-lg";
+                
+                threadDiv.innerHTML = `
+                    <div class="flex justify-between text-[10px] mb-2 font-bold">
+                        <span class="text-emerald-500">TID: ${t.tid}</span>
+                        <span class="text-slate-500">AFFINITY: CORE_${t.core}</span>
+                    </div>
+                    <div class="flex gap-1 h-8">
+                        ${t.stack.map((s, i) => `
+                            <div class="flex-grow border-l-2 border-emerald-500/40 bg-emerald-500/5 px-2 flex items-center overflow-hidden">
+                                <span class="text-[9px] whitespace-nowrap">${s}</span>
+                            </div>
+                        `).join('')}
+                    </div>
+                `;
+                list.appendChild(threadDiv);
+            });
+        }
 
-        const nodes = svg.selectAll(".node")
-            .data(root.descendants())
-            .enter().append("g")
-            .attr("class", "node")
-            .attr("transform", d => `translate(${d.x0},${d.y0})`);
+        function renderPressure() {
+            const width = 120, height = 120;
+            const svg = d3.select("#gauge-container").append("svg").attr("width", width).attr("height", height)
+                .append("g").attr("transform", `translate(${width/2},${height/2})`);
+            
+            const arc = d3.arc().innerRadius(45).outerRadius(55).startAngle(0);
+            const pressure = (telemetry.threads.length / 16) * 2 * Math.PI;
 
-        nodes.append("rect")
-            .attr("width", d => d.x1 - d.x0)
-            .attr("height", d => d.y1 - d.y0)
-            .attr("fill", d => color(d.depth));
-        
-        nodes.append("text")
-            .attr("dx", 8)
-            .attr("dy", 18)
-            .text(d => (d.x1 - d.x0 > 50) ? d.data.name.toUpperCase() : "");
+            svg.append("path").datum({endAngle: 2*Math.PI}).style("fill", "#1e293b").attr("d", arc);
+            svg.append("path").datum({endAngle: pressure}).style("fill", "#10b981").attr("d", arc);
+            svg.append("text").attr("text-anchor", "middle").attr("dy", "0.3em").attr("fill", "#fff").style("font-size", "14px").text(Math.round(pressure/6.28*100) + "%");
+        }
 
-        nodes.append("text")
-            .attr("dx", 8)
-            .attr("dy", 32)
-            .attr("class", "opacity-40 text-[8px]")
-            .text(d => (d.x1 - d.x0 > 50) ? `DEPTH: ${d.depth}` : "");
+        init();
     </script>
 </body>
-</html>)";
+</html>
+)";
         return html;
     }
 
