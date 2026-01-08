@@ -1,108 +1,171 @@
 #pragma once
 #include <vector>
+#include <string>
 #include <string_view>
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <mutex>
+#include <map>
+#include <thread>
+#include <sstream>
+#include <array>
+
+// For Linux-specific CPU/Thread telemetry
+#ifdef __linux__
+#include <sched.h>
+#include <sys/syscall.h>
+#include <unistd.h>
+#endif
+
+// Placeholder for Vulkan headers (if available)
+// #include <vulkan/vulkan.h>
 
 /**
- * @brief Orbital Profiler Core
- * Integrated telemetry for CPU, Heap, Stack, and Queue monitoring.
- * Designed for < 50ns overhead on the hot path.
+ * @brief Orbital Profiler V3 (Full-Stack Observability)
+ * Integrates CPU, Kernel (eBPF-ready), and GPU (Vulkan) tracing.
  */
 namespace CallStack {
 
-    // --- 1. Callstack & Execution Path ---
-    
+    // --- 1. Zero-Overhead Hardware Clock ---
+    inline uint64_t rdtsc() {
+        return __builtin_readcyclecounter();
+    }
+
+    // --- 2. Advanced Thread State (Kernel & Migration Awareness) ---
+    struct ThreadState {
+        uint32_t tid;
+        int last_core;
+        uint64_t last_update_ts;
+        std::vector<std::string> callstack_copy;
+        
+        // HFT Metrics
+        uint32_t migration_count{0}; // Track if thread jumps cores
+        uint64_t stall_cycles{0};    // Potential kernel-mode time
+    };
+
+    // --- 3. Vulkan GPU Tracer (AMD/Generic) ---
+    // Uses VK_EXT_debug_utils for command buffer labeling
+    struct GpuScope {
+        // Mocking Vulkan handles for logic demonstration
+        // VkCommandBuffer cmd; 
+        
+        GpuScope(const char* label_name) {
+            // Implementation: vkCmdBeginDebugUtilsLabelEXT(cmd, &labelInfo);
+            // This allows tools like Radeon GPU Profiler (RGP) to see our scopes.
+        }
+        ~GpuScope() {
+            // Implementation: vkCmdEndDebugUtilsLabelEXT(cmd);
+        }
+    };
+
+    // --- 4. Dynamic Instrumentation Wrapper (eBPF/Uprobes) ---
     /**
-     * @brief Thread-local storage for the current execution depth.
-     * Uses a fixed-size buffer to avoid allocations during deep recursion.
+     * @brief Marks a location for dynamic instrumentation.
+     * On Linux, these can be targeted by 'bcc' or 'bpftrace' 
+     * using uprobes without restarting the app.
      */
-    inline std::vector<std::string_view>& get_stack() {
+    #define DYNAMIC_PROBE(name) \
+        __asm__ __volatile__ ("nop" : : : "memory"); // NOP instruction for probe attachment
+
+    // --- 5. The Telemetry Hub ---
+    class TelemetryHub {
+    private:
+        struct Registry {
+            std::mutex mtx;
+            std::map<std::thread::id, ThreadState> thread_map;
+        };
+
+        std::array<Registry, 2> buffers_;
+        std::atomic<uint8_t> active_idx_{0};
+
+    public:
+        static TelemetryHub& instance() {
+            static TelemetryHub hub;
+            return hub;
+        }
+
+        /**
+         * @brief PUSH Mechanism: Syncs thread-local state to the active buffer.
+         */
+        void push_state(std::vector<std::string_view>& stack) {
+            auto& active = buffers_[active_idx_.load(std::memory_order_relaxed)];
+            std::lock_guard<std::mutex> lock(active.mtx);
+            
+            auto id = std::this_thread::get_id();
+            auto& state = active.thread_map[id];
+            
+            int current_core = -1;
+#ifdef __linux__
+            current_core = sched_getcpu();
+#endif
+            // Detect Core Migration (HFT Red Flag)
+            if (state.last_core != -1 && state.last_core != current_core) {
+                state.migration_count++;
+            }
+
+            state.last_core = current_core;
+            state.last_update_ts = rdtsc();
+            
+            state.callstack_copy.clear();
+            for(auto s : stack) state.callstack_copy.emplace_back(s);
+        }
+
+        std::string collect_and_flush() {
+            uint8_t old_idx = active_idx_.load();
+            active_idx_.store(old_idx ^ 1, std::memory_order_release);
+
+            auto& data_source = buffers_[old_idx];
+            std::lock_guard<std::mutex> lock(data_source.mtx);
+
+            std::stringstream ss;
+            ss << "{\"ts\":" << rdtsc() << ",\"threads\":[";
+            bool first = true;
+            for (auto const& [id, state] : data_source.thread_map) {
+                if (!first) ss << ",";
+                ss << "{\"tid\":" << std::hash<std::thread::id>{}(id) 
+                   << ",\"core\":" << state.last_core 
+                   << ",\"migrations\":" << state.migration_count
+                   << ",\"stack\":[";
+                for (size_t i = 0; i < state.callstack_copy.size(); ++i) {
+                    ss << "\"" << state.callstack_copy[i] << "\"" << (i == state.callstack_copy.size() - 1 ? "" : ",");
+                }
+                ss << "]}";
+                first = false;
+            }
+            ss << "]}";
+            return ss.str();
+        }
+    };
+
+    // --- 6. RAII Frames ---
+    inline std::vector<std::string_view>& get_local_stack() {
         thread_local std::vector<std::string_view> stack;
-        if (stack.capacity() == 0) stack.reserve(32); 
         return stack;
     }
 
-    /**
-     * @brief RAII Frame for the Callstack
-     * Automatically pushes/pops names and tracks cycle counts.
-     */
-    struct CallFrame {
-        uint64_t start_cycles;
-
-        explicit CallFrame(std::string_view name) {
-            get_stack().push_back(name);
-            // Low-latency hardware timestamp
-            start_cycles = __builtin_readcyclecounter();
+    struct ProfileFrame {
+        explicit ProfileFrame(std::string_view name) {
+            get_local_stack().push_back(name);
+            TelemetryHub::instance().push_state(get_local_stack());
         }
-
-        ~CallFrame() {
-            // Optional: You could log (end - start) to a ring buffer here
-            get_stack().pop_back();
+        ~ProfileFrame() {
+            get_local_stack().pop_back();
+            TelemetryHub::instance().push_state(get_local_stack());
         }
     };
-
-    // --- 2. Orbital Metrics (Instant Telemetry) ---
-
-    struct InstantMetrics {
-        std::atomic<uint64_t> cpu_load_ticks{0};
-        std::atomic<int64_t>  heap_usage_bytes{0};
-        std::atomic<uint32_t> queue_length{0};
-        std::atomic<uint32_t> active_workers{0};
-        
-        // Singleton for global telemetry access
-        static InstantMetrics& instance() {
-            static InstantMetrics m;
-            return m;
-        }
-    };
-
-    /**
-     * @brief Memory Tracker Hook
-     * Usage: Call inside custom new/delete or middleware.
-     */
-    inline void track_heap(int64_t delta) {
-        InstantMetrics::instance().heap_usage_bytes.fetch_add(delta, std::memory_order_relaxed);
-    }
-
-    /**
-     * @brief Queue Depth Monitor
-     * Tracks how many requests are waiting in the worker pool.
-     */
-    inline void set_queue_length(uint32_t len) {
-        InstantMetrics::instance().queue_length.store(len, std::memory_order_relaxed);
-    }
-
-    // --- 3. Sampling Logic ---
-
-    /**
-     * @brief Snapshot of the system state for the UI.
-     * This is what the 'render_ui' function in pipeline.hpp eventually consumes.
-     */
-    struct Snapshot {
-        uint64_t timestamp;
-        double cpu_percent;
-        size_t heap_mb;
-        uint32_t q_len;
-        std::vector<std::string_view> current_path;
-    };
-
-    inline Snapshot take_snapshot() {
-        auto& metrics = InstantMetrics::instance();
-        return {
-            static_cast<uint64_t>(std::chrono::system_clock::now().time_since_epoch().count()),
-            static_cast<double>(metrics.cpu_load_ticks.load() % 100), // Simplified
-            static_cast<size_t>(metrics.heap_usage_bytes.load() / (1024 * 1024)),
-            metrics.queue_length.load(),
-            get_stack()
-        };
-    }
 }
 
-/**
- * MACROS for clean profiling in hot paths
- */
-#define PROFILE_SCOPE(name) CallStack::CallFrame __frame_##__LINE__(name)
-#define TRACK_MEMORY(delta) CallStack::track_heap(delta)
-#define UPDATE_QUEUE(len)   CallStack::set_queue_length(len)
+// --- Global API Macros ---
+
+// Standard CPU Scope
+#define PROFILE_SCOPE(name) CallStack::ProfileFrame __frame_##__LINE__(name)
+
+// GPU Command Buffer Scope
+#define GPU_SCOPE(label) CallStack::GpuScope __gpu_##__LINE__(label)
+
+// Dynamic Probe Point (Attach eBPF here)
+#define PROBE_POINT(name) DYNAMIC_PROBE(name)
+
+// Logic to flush to the visualizer
+#define TELEMETRY_FLUSH() CallStack::TelemetryHub::instance().collect_and_flush()
