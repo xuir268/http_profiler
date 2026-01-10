@@ -23,7 +23,7 @@
 
 /**
  * @brief Orbital Profiler V3 (Full-Stack Observability)
- * Integrates CPU, Kernel (eBPF-ready), GPU (Vulkan), and Network tracing.
+ * Integrates CPU, Kernel (eBPF-ready), and GPU (Vulkan) tracing.
  */
 namespace CallStack {
 
@@ -42,49 +42,33 @@ namespace CallStack {
         // HFT Metrics
         uint32_t migration_count{0}; // Track if thread jumps cores
         uint64_t stall_cycles{0};    // Potential kernel-mode time
-        
-        // Network Stats per Thread
-        uint64_t bytes_sent{0};
-        uint64_t bytes_received{0};
-        uint64_t last_packet_latency_ns{0};
     };
 
     // --- 3. Vulkan GPU Tracer (AMD/Generic) ---
+    // Uses VK_EXT_debug_utils for command buffer labeling
     struct GpuScope {
+        // Mocking Vulkan handles for logic demonstration
+        // VkCommandBuffer cmd; 
+        
         GpuScope(const char* label_name) {
-            // Implementation: vkCmdBeginDebugUtilsLabelEXT
+            // Implementation: vkCmdBeginDebugUtilsLabelEXT(cmd, &labelInfo);
+            // This allows tools like Radeon GPU Profiler (RGP) to see our scopes.
         }
         ~GpuScope() {
-            // Implementation: vkCmdEndDebugUtilsLabelEXT
+            // Implementation: vkCmdEndDebugUtilsLabelEXT(cmd);
         }
     };
 
-    // --- 4. Network Profiler (Socket-level Telemetry) ---
+    // --- 4. Dynamic Instrumentation Wrapper (eBPF/Uprobes) ---
     /**
-     * @brief Tracks network I/O duration and throughput.
-     * Useful for identifying TCP backpressure or NIC saturation.
+     * @brief Marks a location for dynamic instrumentation.
+     * On Linux, these can be targeted by 'bcc' or 'bpftrace' 
+     * using uprobes without restarting the app.
      */
-    struct NetworkScope {
-        const char* op_name;
-        uint64_t start_ns;
-        size_t* bytes_ptr;
-
-        NetworkScope(const char* name, size_t& bytes_counter) 
-            : op_name(name), bytes_ptr(&bytes_counter) {
-            start_ns = rdtsc();
-        }
-
-        ~NetworkScope() {
-            uint64_t delta = rdtsc() - start_ns;
-            // Update thread-local or global registry here if needed
-        }
-    };
-
-    // --- 5. Dynamic Instrumentation Wrapper (eBPF/Uprobes) ---
     #define DYNAMIC_PROBE(name) \
-        __asm__ __volatile__ ("nop" : : : "memory"); 
+        __asm__ __volatile__ ("nop" : : : "memory"); // NOP instruction for probe attachment
 
-    // --- 6. The Telemetry Hub ---
+    // --- 5. The Telemetry Hub ---
     class TelemetryHub {
     private:
         struct Registry {
@@ -115,6 +99,7 @@ namespace CallStack {
 #ifdef __linux__
             current_core = sched_getcpu();
 #endif
+            // Detect Core Migration (HFT Red Flag)
             if (state.last_core != -1 && state.last_core != current_core) {
                 state.migration_count++;
             }
@@ -124,18 +109,6 @@ namespace CallStack {
             
             state.callstack_copy.clear();
             for(auto s : stack) state.callstack_copy.emplace_back(s);
-        }
-
-        /**
-         * @brief Specialized update for network metrics without full stack push
-         */
-        void update_network(size_t sent, size_t received, uint64_t latency) {
-            auto& active = buffers_[active_idx_.load(std::memory_order_relaxed)];
-            std::lock_guard<std::mutex> lock(active.mtx);
-            auto& state = active.thread_map[std::this_thread::get_id()];
-            state.bytes_sent += sent;
-            state.bytes_received += received;
-            state.last_packet_latency_ns = latency;
         }
 
         std::string collect_and_flush() {
@@ -153,7 +126,6 @@ namespace CallStack {
                 ss << "{\"tid\":" << std::hash<std::thread::id>{}(id) 
                    << ",\"core\":" << state.last_core 
                    << ",\"migrations\":" << state.migration_count
-                   << ",\"net\":{\"tx\":" << state.bytes_sent << ",\"rx\":" << state.bytes_received << ",\"lat\":" << state.last_packet_latency_ns << "}"
                    << ",\"stack\":[";
                 for (size_t i = 0; i < state.callstack_copy.size(); ++i) {
                     ss << "\"" << state.callstack_copy[i] << "\"" << (i == state.callstack_copy.size() - 1 ? "" : ",");
@@ -166,7 +138,7 @@ namespace CallStack {
         }
     };
 
-    // --- 7. RAII Frames ---
+    // --- 6. RAII Frames ---
     inline std::vector<std::string_view>& get_local_stack() {
         thread_local std::vector<std::string_view> stack;
         return stack;
@@ -191,9 +163,6 @@ namespace CallStack {
 
 // GPU Command Buffer Scope
 #define GPU_SCOPE(label) CallStack::GpuScope __gpu_##__LINE__(label)
-
-// Network I/O Scope
-#define NET_SCOPE(name, byte_count) CallStack::NetworkScope __net_##__LINE__(name, byte_count)
 
 // Dynamic Probe Point (Attach eBPF here)
 #define PROBE_POINT(name) DYNAMIC_PROBE(name)
