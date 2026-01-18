@@ -10,6 +10,7 @@
 #include <thread>
 #include <sstream>
 #include <array>
+#include <mutex>
 
 // For Linux-specific CPU/Thread telemetry
 #ifdef __linux__
@@ -154,6 +155,35 @@ namespace CallStack {
             TelemetryHub::instance().push_state(get_local_stack());
         }
     };
+
+    enum class Phase : uint8_t { Begin, End, Instant, Counter };
+
+struct TraceEvent {
+    uint64_t ts_us;      // timestamp in microseconds
+    uint32_t tid;        // thread id (for Chrome trace "tid")
+    uint32_t name_id;    // interned name id
+    Phase phase;
+    int64_t value;       // for counters / instant metadata (optional)
+};
+
+struct NameInterner {
+    std::mutex mtx;
+    std::vector<std::string> names;
+    std::unordered_map<std::string, uint32_t> map;
+
+    uint32_t intern(std::string_view sv) {
+        std::lock_guard<std::mutex> g(mtx);
+        auto it = map.find(std::string(sv));
+        if (it != map.end()) return it->second;
+        uint32_t id = (uint32_t)names.size();
+        names.emplace_back(sv);
+        map.emplace(names.back(), id);
+        return id;
+    }
+
+    const std::string& get(uint32_t id) const {
+        return names[id];
+    }
 }
 
 // --- Global API Macros ---
