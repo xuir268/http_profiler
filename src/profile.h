@@ -38,7 +38,7 @@ namespace CallStack {
         uint32_t tid;
         int last_core;
         uint64_t last_update_ts;
-        std::vector<std::string> callstack_copy;
+        ::std::vector<::std::string> callstack_copy;
         
         // HFT Metrics
         uint32_t migration_count{0}; // Track if thread jumps cores
@@ -73,12 +73,12 @@ namespace CallStack {
     class TelemetryHub {
     private:
         struct Registry {
-            std::mutex mtx;
-            std::map<std::thread::id, ThreadState> thread_map;
+            ::std::mutex mtx;
+            ::std::map<::std::thread::id, ThreadState> thread_map;
         };
 
-        std::array<Registry, 2> buffers_;
-        std::atomic<uint8_t> active_idx_{0};
+        ::std::array<Registry, 2> buffers_;
+        ::std::atomic<uint8_t> active_idx_{0};
 
     public:
         static TelemetryHub& instance() {
@@ -89,11 +89,11 @@ namespace CallStack {
         /**
          * @brief PUSH Mechanism: Syncs thread-local state to the active buffer.
          */
-        void push_state(std::vector<std::string_view>& stack) {
-            auto& active = buffers_[active_idx_.load(std::memory_order_relaxed)];
-            std::lock_guard<std::mutex> lock(active.mtx);
+        void push_state(::std::vector<::std::string_view>& stack) {
+            auto& active = buffers_[active_idx_.load(::std::memory_order_relaxed)];
+            ::std::lock_guard<::std::mutex> lock(active.mtx);
             
-            auto id = std::this_thread::get_id();
+            auto id = ::std::this_thread::get_id();
             auto& state = active.thread_map[id];
             
             int current_core = -1;
@@ -112,19 +112,19 @@ namespace CallStack {
             for(auto s : stack) state.callstack_copy.emplace_back(s);
         }
 
-        std::string collect_and_flush() {
+        ::std::string collect_and_flush() {
             uint8_t old_idx = active_idx_.load();
-            active_idx_.store(old_idx ^ 1, std::memory_order_release);
+            active_idx_.store(old_idx ^ 1, ::std::memory_order_release);
 
             auto& data_source = buffers_[old_idx];
-            std::lock_guard<std::mutex> lock(data_source.mtx);
+            ::std::lock_guard<::std::mutex> lock(data_source.mtx);
 
-            std::stringstream ss;
+            ::std::stringstream ss;
             ss << "{\"ts\":" << rdtsc() << ",\"threads\":[";
             bool first = true;
             for (auto const& [id, state] : data_source.thread_map) {
                 if (!first) ss << ",";
-                ss << "{\"tid\":" << std::hash<std::thread::id>{}(id) 
+                ss << "{\"tid\":" << ::std::hash<::std::thread::id>{}(id) 
                    << ",\"core\":" << state.last_core 
                    << ",\"migrations\":" << state.migration_count
                    << ",\"stack\":[";
@@ -140,13 +140,13 @@ namespace CallStack {
     };
 
     // --- 6. RAII Frames ---
-    inline std::vector<std::string_view>& get_local_stack() {
-        thread_local std::vector<std::string_view> stack;
+    inline ::std::vector<::std::string_view>& get_local_stack() {
+        thread_local ::std::vector<::std::string_view> stack;
         return stack;
     }
 
     struct ProfileFrame {
-        explicit ProfileFrame(std::string_view name) {
+        explicit ProfileFrame(::std::string_view name) {
             get_local_stack().push_back(name);
             TelemetryHub::instance().push_state(get_local_stack());
         }
@@ -167,13 +167,13 @@ struct TraceEvent {
 };
 
 struct NameInterner {
-    std::mutex mtx;
-    std::vector<std::string> names;
-    std::unordered_map<std::string, uint32_t> map;
+    ::std::mutex mtx;
+    ::std::vector<::std::string> names;
+    ::std::unordered_map<::std::string, uint32_t> map;
 
-    uint32_t intern(std::string_view sv) {
-        std::lock_guard<std::mutex> g(mtx);
-        auto it = map.find(std::string(sv));
+    uint32_t intern(::std::string_view sv) {
+        ::std::lock_guard<::std::mutex> g(mtx);
+        auto it = map.find(::std::string(sv));
         if (it != map.end()) return it->second;
         uint32_t id = (uint32_t)names.size();
         names.emplace_back(sv);
@@ -181,10 +181,10 @@ struct NameInterner {
         return id;
     }
 
-    const std::string& get(uint32_t id) const {
+    const ::std::string& get(uint32_t id) const {
         return names[id];
     }
-}
+};
 
 // --- Global API Macros ---
 
