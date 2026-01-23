@@ -20,4 +20,18 @@ namespace CallStack {
     #endif
     }
     
+    struct ThreadState {
+        uint32_t tid{0};
+        int last_core{-1};
+        uint64_t last_update_ts{0};
+
+        // Optional user-friendly name for UI (Orbit-style)
+        std::string thread_name;
+
+        std::vector<std::string> callstack_copy;
+
+        // HFT-style metrics
+        uint32_t migration_count{0}; // how many times we jumped cores
+        uint64_t stall_cycles{0};    // reserved for kernel / stall time if you sample it later
+    };
 }
