@@ -34,4 +34,14 @@ namespace CallStack {
         uint32_t migration_count{0}; // how many times we jumped cores
         uint64_t stall_cycles{0};    // reserved for kernel / stall time if you sample it later
     };
-}
+
+    struct GpuScope {
+        explicit GpuScope(uint64_t start_ts) {}
+        ~GpuScope() {}
+    };
+
+};
+
+    #define DYNAMIC_PROBE(name) \
+        __asm__ __volatile__("nop" ::: "memory");
+
