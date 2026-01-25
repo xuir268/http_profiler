@@ -1,6 +1,13 @@
 #pragma once
 #include <iostream>
-
+#include <array>
+#include <atomic>
+#include <chrono>
+#include <mutex>
+#include <string>
+#include <thread>
+#include <unordered_map>
+#include <vector>
 
 
 namespace CallStack {
@@ -30,7 +37,6 @@ namespace CallStack {
 
         std::vector<std::string> callstack_copy;
 
-        // HFT-style metrics
         uint32_t migration_count{0}; // how many times we jumped cores
         uint64_t stall_cycles{0};    // reserved for kernel / stall time if you sample it later
     };
@@ -40,8 +46,23 @@ namespace CallStack {
         ~GpuScope() {}
     };
 
-};
+
 
     #define DYNAMIC_PROBE(name) \
         __asm__ __volatile__("nop" ::: "memory");
 
+class TelemetryHub {
+    private:
+        struct Registry {
+            std::mutex mtx;
+            std::unordered_map<std::thread::id, ThreadState> thread_map;
+        };
+
+        std::array<Registry,2> buffers_{};
+        std::atomic<uint8_t> active_idx_{0};
+
+        TelemetryHub() = default;
+    public:
+        static TelemetryHub& instance() {}
+};
+}
