@@ -63,6 +63,21 @@ class TelemetryHub {
 
         TelemetryHub() = default;
     public:
-        static TelemetryHub& instance() {}
+        static TelemetryHub& instance() {
+            static TelemetryHub hub;
+            return hub;
+        }
+        
+        void set_thread_name(const std::string& name) {
+           auto& active = buffers_[active_idx_.load(std::memory_order_relaxed)];
+           std::lock_guard lock(active.mtx);
+           auto tid = std::this_thread::get_id();
+           auto& state = active.thread_map[tid];
+           state.thread_name = name;
+        }
+
+        void push_state(const std::vector<std::string>& stack) {
+
+        }
 };
 }
