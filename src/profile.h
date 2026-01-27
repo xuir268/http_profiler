@@ -46,8 +46,6 @@ namespace CallStack {
         ~GpuScope() {}
     };
 
-
-
     #define DYNAMIC_PROBE(name) \
         __asm__ __volatile__("nop" ::: "memory");
 
@@ -76,8 +74,62 @@ class TelemetryHub {
            state.thread_name = name;
         }
 
-        void push_state(const std::vector<std::string>& stack) {
+        void push_state(const std::vector<std::string_view>& stack) {
+            auto& active = buffers_[active_idx_.load(std::memory_order_relaxed)];
+            std::lock_guard<std::mutex> lock(active.mtx);
 
+            auto id = std::this_thread::get_id();
+            auto& state = active.thread_map[id];
+
+            // Thread id hash for UI
+            if (state.tid == 0) {
+                // Use hash of std::thread::id as a stable-ish fake tid
+                state.tid = static_cast<uint32_t>(std::hash<std::thread::id>{}(id));
+            }
+
+            int current_core = -1;
+        #ifdef __linux__
+            current_core = sched_getcpu();
+        #endif
+
+            // Detect Core Migration (HFT-red-flag)
+            if (state.last_core != -1 && state.last_core != current_core) {
+                state.migration_count++;
+            }
+
+            state.last_core = current_core;
+            state.last_update_ts = rdtsc();
+
+            state.callstack_copy.clear();
+            state.callstack_copy.reserve(stack.size());
+            for (auto s : stack) {
+                state.callstack_copy.emplace_back(s);
+            }
         }
+        
+        inline std::vector<std::string>& get_local_stack() {
+            thread_local std::vector<std::string> local_stack;
+            return local_stack;
+        }
+
+        struct ProfileFrame {
+            explicit ProfileFrame(std::string_view name) {
+                auto& stack = TelemetryHub::instance().get_local_stack();
+                stack.push_back(std::string(name));
+                TelemetryHub::instance().push_state(stack);
+            }
+            ~ProfileFrame() {
+                auto& stack = TelemetryHub::instance().get_local_stack();
+                if (!stack.empty()) {
+                    stack.pop_back();
+                }
+            }
+        };
 };
+
+    // Alias for backward compatibility
+    using CallFrame = TelemetryHub::ProfileFrame;
+
+
+
 }
