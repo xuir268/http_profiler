@@ -11,6 +11,55 @@
 
 
 namespace CallStack {
+
+    enum class Phase : uint8_t { Begin, End, Instant, Counter };
+
+    struct TraceEvent {
+        uint64_t ts_us;
+        uint32_t tid;
+        uint32_t name_id;
+        Phase phase;
+        int64_t value;
+        int cpu_core;
+    };
+
+    struct NameInterner {
+        std::mutex mtx;
+        std::vector<std::string> names;
+        std::unordered_map<std::string, uint32_t> map;
+
+    uint32_t intern(std::string_view sv) {
+        std::lock_guard<std::mutex> g(mtx);
+        auto it = map.find(std::string(sv));
+        if (it != map.end()) return it->second;
+        uint32_t id = (uint32_t)names.size();
+        names.emplace_back(sv);
+        map.emplace(names.back(), id);
+        return id;
+    }
+
+    const std::string& get(uint32_t id) const {
+        return names[id];
+    }
+    };
+
+    template <size_t N>
+    struct ThreadRing {
+    static_assert((N & (N - 1)) == 0, "N must be power of two for masking");
+    
+    // Use atomics for head/tail to make it visible across threads without mutexes
+    alignas(64) std::atomic<uint32_t> head{0}; 
+    alignas(64) TraceEvent buf[N];
+
+    // Worker pushes here (Zero Locks)
+    void push(const TraceEvent& e) {
+        uint32_t h = head.load(std::memory_order_relaxed);
+        buf[h & (N - 1)] = e;
+        // Release ensures the event is written before the head increments
+        head.store(h + 1, std::memory_order_release);
+        }
+    };  
+
     inline uint64_t rdtsc() {
     #if defined(__has_builtin)
         #if __has_builtin(__builtin_readcyclecounter)
@@ -74,39 +123,8 @@ class TelemetryHub {
            state.thread_name = name;
         }
 
-        void push_state(const std::vector<std::string_view>& stack) {
-            auto& active = buffers_[active_idx_.load(std::memory_order_relaxed)];
-            std::lock_guard<std::mutex> lock(active.mtx);
-
-            auto id = std::this_thread::get_id();
-            auto& state = active.thread_map[id];
-
-            // Thread id hash for UI
-            if (state.tid == 0) {
-                // Use hash of std::thread::id as a stable-ish fake tid
-                state.tid = static_cast<uint32_t>(std::hash<std::thread::id>{}(id));
-            }
-
-            int current_core = -1;
-        #ifdef __linux__
-            current_core = sched_getcpu();
-        #endif
-
-            // Detect Core Migration (HFT-red-flag)
-            if (state.last_core != -1 && state.last_core != current_core) {
-                state.migration_count++;
-            }
-
-            state.last_core = current_core;
-            state.last_update_ts = rdtsc();
-
-            state.callstack_copy.clear();
-            state.callstack_copy.reserve(stack.size());
-            for (auto s : stack) {
-                state.callstack_copy.emplace_back(s);
-            }
-        }
         
+
         inline std::vector<std::string>& get_local_stack() {
             thread_local std::vector<std::string> local_stack;
             return local_stack;
