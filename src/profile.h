@@ -1,10 +1,14 @@
 #pragma once
-#include <iostream>
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <functional>
+#include <iostream>
 #include <mutex>
+#include <sstream>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <unordered_map>
 #include <vector>
@@ -76,19 +80,6 @@ namespace CallStack {
     #endif
     }
     
-    struct ThreadState {
-        uint32_t tid{0};
-        int last_core{-1};
-        uint64_t last_update_ts{0};
-
-        // Optional user-friendly name for UI (Orbit-style)
-        std::string thread_name;
-
-        std::vector<std::string> callstack_copy;
-
-        uint32_t migration_count{0}; // how many times we jumped cores
-        uint64_t stall_cycles{0};    // reserved for kernel / stall time if you sample it later
-    };
 
     struct GpuScope {
         explicit GpuScope(uint64_t start_ts) {}
@@ -98,56 +89,160 @@ namespace CallStack {
     #define DYNAMIC_PROBE(name) \
         __asm__ __volatile__("nop" ::: "memory");
 
+    #define TRACE_SCOPE(name) CallStack::ProfileFrame frame_##__LINE__(name)
+    #define PROFILE_SCOPE(name) CallStack::ProfileFrame frame_##__LINE__(name)
+    #define NET_SCOPE(name, bytes) CallStack::ProfileFrame frame_##__LINE__(name)
+    #define PROBE_POINT(name) DYNAMIC_PROBE(name)
+    #define GPU_SCOPE(name) auto _gpu_scope = CallStack::GpuScope(CallStack::TelemetryHub::instance().get_timestamp());
+    #define TELEMETRY_FLUSH() ("{}")
+
 class TelemetryHub {
     private:
         struct Registry {
-            std::mutex mtx;
-            std::unordered_map<std::thread::id, ThreadState> thread_map;
+            NameInterner interner;
+            std::mutex rg_mtx;
+            std::vector<ThreadRing<8192>*> all_rings;
         };
-
         std::array<Registry,2> buffers_{};
         std::atomic<uint8_t> active_idx_{0};
 
         TelemetryHub() = default;
+
+        Registry& registry() {
+            return buffers_[active_idx_.load(std::memory_order_relaxed)];
+        }
+
+        const Registry& registry() const {
+            return buffers_[active_idx_.load(std::memory_order_relaxed)];
+        }
     public:
         static TelemetryHub& instance() {
             static TelemetryHub hub;
             return hub;
         }
+
+        static ThreadRing<8192>& get_tls_ring() {
+        thread_local ThreadRing<8192> ring;
+        thread_local bool registered = []() {
+            auto& inst = TelemetryHub::instance();
+            auto& reg = inst.registry();
+            std::lock_guard<std::mutex> lock(reg.rg_mtx);
+            reg.all_rings.push_back(&ring);
+            return true;
+        }();
+        return ring;
+    }
+
+    uint32_t intern_name(std::string_view name) {
+        return registry().interner.intern(name);
+    }
+
+    uint64_t get_timestamp() const {
+        return rdtsc();
+    }
+
+    void update_network(size_t bytes, uint64_t latency, uint64_t bandwidth) {
+        // Placeholder for network metric updates
+    }
+
+    inline std::vector<std::string>& get_local_stack() {
+        thread_local std::vector<std::string> local_stack;
+        return local_stack;
+    }
         
-        void set_thread_name(const std::string& name) {
-           auto& active = buffers_[active_idx_.load(std::memory_order_relaxed)];
-           std::lock_guard lock(active.mtx);
-           auto tid = std::this_thread::get_id();
-           auto& state = active.thread_map[tid];
-           state.thread_name = name;
-        }
-
+       // High performance recording
+    void record(uint32_t name_id, Phase phase, int64_t value = 0) {
+        int core = -1;
+#ifdef __linux__
+        core = sched_getcpu();
+#endif
         
+        auto now = std::chrono::steady_clock::now().time_since_epoch();
+        uint64_t ts = std::chrono::duration_cast<std::chrono::microseconds>(now).count();
+        
+        get_tls_ring().push({
+            ts,
+            static_cast<uint32_t>(std::hash<std::thread::id>{}(std::this_thread::get_id())),
+            name_id,
+            phase,
+            value,
+            core
+        });
+    }
 
-        inline std::vector<std::string>& get_local_stack() {
-            thread_local std::vector<std::string> local_stack;
-            return local_stack;
-        }
-
-        struct ProfileFrame {
-            explicit ProfileFrame(std::string_view name) {
-                auto& stack = TelemetryHub::instance().get_local_stack();
-                stack.push_back(std::string(name));
-                TelemetryHub::instance().push_state(stack);
-            }
-            ~ProfileFrame() {
-                auto& stack = TelemetryHub::instance().get_local_stack();
-                if (!stack.empty()) {
-                    stack.pop_back();
+    // Export function (Can be slow, runs on a different thread)
+    std::string export_chrome_trace() {
+        std::vector<TraceEvent> events;
+        
+        {
+            auto& reg = registry();
+            std::lock_guard<std::mutex> lock(reg.rg_mtx);
+            for (auto* ring : reg.all_rings) {
+                // Acquire ensures we see the latest writes from that thread
+                uint32_t count = ring->head.load(std::memory_order_acquire);
+                // Simple logic: grab everything recorded so far
+                // In a production system, you'd handle ring-wrap-around here
+                for (uint32_t i = 0; i < std::min(count, 8192u); ++i) {
+                    events.push_back(ring->buf[i]);
                 }
             }
-        };
+        }
+
+        std::sort(events.begin(), events.end(), [](auto& a, auto& b) {
+            return a.ts_us < b.ts_us;
+        });
+
+        std::ostringstream os;
+        os << "{ \"traceEvents\": [";
+        for (size_t i = 0; i < events.size(); ++i) {
+            const auto& e = events[i];
+            const char* ph = (e.phase == Phase::Begin) ? "B" : (e.phase == Phase::End) ? "E" : "i";
+            
+            os << (i == 0 ? "" : ",") << "{"
+               << "\"ph\":\"" << ph << "\","
+               << "\"ts\":" << e.ts_us << ","
+               << "\"pid\":1,"
+               << "\"tid\":" << e.tid << ","
+               << "\"name\":\"" << registry().interner.get(e.name_id) << "\","
+               << "\"args\":{\"cpu\":" << e.cpu_core << "}";
+            if (e.phase == Phase::Instant) os << ",\"value\":" << e.value;
+            os << "}";
+        }
+        os << "], \"displayTimeUnit\":\"us\" }";
+        return os.str();
+    }
 };
 
-    // Alias for backward compatibility
-    using CallFrame = TelemetryHub::ProfileFrame;
+// RAII Scope for profiling
+struct ProfileFrame {
+    uint32_t id;
+    explicit ProfileFrame(std::string_view name) {
+        auto& stack = TelemetryHub::instance().get_local_stack();
+        stack.emplace_back(std::string(name));
+        id = TelemetryHub::instance().intern_name(name);
+        TelemetryHub::instance().record(id, Phase::Begin);
+    }
+    ~ProfileFrame() {
+        TelemetryHub::instance().record(id, Phase::End);
+        auto& stack = TelemetryHub::instance().get_local_stack();
+        if (!stack.empty()) {
+            stack.pop_back();
+        }
+    }
+};
 
+#define TRACE_SCOPE(name) CallStack::ProfileFrame frame_##__LINE__(name)
 
+using CallFrame = ProfileFrame;
 
+inline std::vector<std::string>& get_stack() {
+    return TelemetryHub::instance().get_local_stack();
 }
+
+inline CallFrame span(std::string_view name) {
+    return CallFrame(name);
+}
+
+} // namespace CallStack
+
+
